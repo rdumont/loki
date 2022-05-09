@@ -1,70 +1,102 @@
 package loki
 
-import "sync"
+import (
+	"fmt"
+	"strings"
+)
 
-// Method is the basic structure used to fake method calls
-//
-// Example:
-// type FakeTodoList struct {
-//     AddCalls		loki.Method
-// }
-type Method struct {
-	sync.Mutex
-	calls        []Params
-	expectations []*ExpectedCall
+type Matcher[T any] interface {
+	Matches(T) bool
+	Values() []interface{}
 }
 
-// CallCount retrieves how many times the method has been called
-func (m *Method) CallCount() int {
-	return len(m.calls)
+type call[TIn, TOut any] struct {
+	In       TIn
+	Out      TOut
+	Expected bool
 }
 
-// GetCall returns the parameters of the first call made to the method, or nil
-func (m *Method) GetCall() Params {
-	if len(m.calls) == 0 {
-		return nil
+type TestReporter interface {
+	Helper()
+	Cleanup(func())
+	Errorf(format string, args ...any)
+}
+
+type Method[TIn Matcher[TIn], TOut any] struct {
+	setups []*Setup[TIn, TOut]
+	calls  []call[TIn, TOut]
+	strict bool
+	t      TestReporter
+}
+
+func (m *Method[TIn, TOut]) Strict(t TestReporter) *Method[TIn, TOut] {
+	t.Helper()
+
+	if m.strict == true {
+		return m
 	}
 
-	return m.calls[0]
+	m.strict = true
+	m.t = t
+	t.Cleanup(m.assert)
+
+	return m
 }
 
-// GetNthCall returns the parameters of the nth call made to a method, or nil
-func (m *Method) GetNthCall(i int) Params {
-	if len(m.calls) == 0 {
-		return nil
+func (m *Method[TIn, TOut]) On(in TIn) *Setup[TIn, TOut] {
+	s := &Setup[TIn, TOut]{matchInput: in}
+	m.setups = append(m.setups, s)
+	return s
+}
+
+func (m *Method[TIn, TOut]) OnAny() *Setup[TIn, TOut] {
+	s := &Setup[TIn, TOut]{matchAnyInput: true}
+	m.setups = append(m.setups, s)
+	return s
+}
+
+func (m *Method[TIn, TOut]) Calls() []TIn {
+	var ins []TIn
+	for _, c := range m.calls {
+		ins = append(ins, c.In)
+	}
+	return ins
+}
+
+func (m *Method[TIn, TOut]) Reset() {
+	m.calls = nil
+	m.setups = nil
+}
+
+func (m *Method[TIn, TOut]) assert() {
+	if !m.strict || m.t == nil {
+		return
 	}
 
-	return m.calls[i]
-}
+	m.t.Helper()
 
-// Receive represents the method receiving a call, and should be used in the method implementation
-//
-// Example:
-// func (tl *FakeTodoList) Add(name string) {
-//     tl.AddCalls.Receive(name)
-// }
-func (m *Method) Receive(a ...interface{}) Params {
-	m.Lock()
-	defer m.Unlock()
-
-	m.calls = append(m.calls, a)
-	for i := len(m.expectations) - 1; i >= 0; i-- {
-		c := m.expectations[i]
-		if c.matches(a) {
-			return c.returns
+	var unexpectedCalls []string
+	for _, c := range m.calls {
+		if c.Expected {
+			continue
 		}
+
+		unexpectedCalls = append(unexpectedCalls, "\t- "+formatValues(c.In.Values()))
 	}
 
-	return nil
+	if len(unexpectedCalls) > 0 {
+		m.t.Errorf("Received %d unexpected calls:\n%s\n", len(unexpectedCalls), strings.Join(unexpectedCalls, "\n"))
+	}
+
+	for _, s := range m.setups {
+		s.assertStrict(m.t)
+	}
 }
 
-// On is used to set up an expected call to the method
-//
-// Example:
-// tl := new(FakeTodoList)
-// tl.AddCalls.On("buy milk").Run(func(p) { fmt.Prinln("Called Add with parameters ", p"); })
-func (m *Method) On(a ...interface{}) *ExpectedCall {
-	c := &ExpectedCall{m, a, nil, nil}
-	m.expectations = append(m.expectations, c)
-	return c
+func formatValues(in []interface{}) string {
+	var args []string
+	for _, v := range in {
+		args = append(args, fmt.Sprintf("%v (%T)", v, v))
+	}
+	return strings.Join(args, "; ")
 }
